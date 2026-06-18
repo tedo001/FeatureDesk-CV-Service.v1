@@ -1,83 +1,92 @@
 import time
+
 from api.v1.schemas.requests import FrameAnalysisRequest
-from api.v1.schemas.responses import AnalysisResponse
+from api.v1.schemas.responses import (
+    AnalysisResponse,
+    BehaviorFlags,
+    EyeMetrics,
+    HeadPose,
+    StudentAnalysis,
+)
 from utils.image_utils import decode_base64_frame
 from vision.detector import YOLODetector
 from vision.face_analyzer import FaceAnalyzer
-from vision.pose_analyzer import PoseAnalyzer
 from vision.head_pose import HeadPoseEstimator
 from vision.eye_tracker import EyeTracker
 from vision.object_classifier import ObjectClassifier
 from behavior.attention_scorer import AttentionScorer
-from behavior.focus_scorer import FocusScorer
-from behavior.state_machine import StateMachine
+from behavior.attention_engine import AttentionEngine
 from behavior.flag_detector import FlagDetector
-from tracking.tracker import ByteTrackWrapper
 from core.logger import get_logger
 
 logger = get_logger(__name__)
 
 
 class AnalysisService:
-    """Orchestrates the full CV → behavior pipeline for a single frame."""
+    """CV -> behaviour pipeline for one frame.
+
+    Faces come straight from MediaPipe on the full frame (reliable, multi-face).
+    YOLO is used only for object detection (phone). Attention is produced by the
+    statistical AttentionEngine (PERCLOS + head-motion + EMA + closure duration).
+    """
 
     def __init__(self) -> None:
         self._detector = YOLODetector()
         self._face = FaceAnalyzer()
-        self._pose = PoseAnalyzer()
         self._head_pose = HeadPoseEstimator()
         self._eye = EyeTracker()
         self._obj_clf = ObjectClassifier()
-        self._tracker = ByteTrackWrapper()
         self._attention = AttentionScorer()
-        self._focus = FocusScorer()
-        self._state = StateMachine()
+        self._engine = AttentionEngine()
         self._flags = FlagDetector()
         self._frame_counter: dict[str, int] = {}
 
     async def process_frame(self, req: FrameAnalysisRequest) -> AnalysisResponse:
-        t0 = time.monotonic()
         frame = decode_base64_frame(req.frame_b64)
+        response, _, _ = self.run_pipeline(
+            frame, req.session_id, req.timestamp_ms or int(time.time() * 1000)
+        )
+        return response
+
+    def run_pipeline(self, frame, session_id: str, timestamp_ms: int):
+        """Core synchronous pipeline. Returns (response, detections, faces) so
+        callers that need the raw boxes (the Tkinter tester) can draw them."""
+        t0 = time.monotonic()
 
         detections = self._detector.detect(frame)
-        tracks = self._tracker.update(detections, frame)
+        objects = self._obj_clf.classify(detections)
+        faces = self._face.detect_faces(frame)
+
         students = []
+        for idx, face in enumerate(faces):
+            eye = self._eye.compute(face)
+            head = self._head_pose.estimate(face)
+            spatial = self._attention.score(head, eye)
 
-        for track in tracks:
-            face_result = self._face.analyse(frame, track.bbox)
-            pose_result = self._pose.analyse(frame, track.bbox)
-            head = self._head_pose.estimate(face_result)
-            eye = self._eye.compute(face_result)
-            objects = self._obj_clf.classify(detections)
+            result = self._engine.update(idx, timestamp_ms, spatial, eye, head)
+            flags = self._flags.detect(eye, objects, None, head)
 
-            attention = self._attention.score(head, eye)
-            focus = self._focus.score(head, eye, pose_result)
-            state = self._state.transition(track.id, attention, eye)
-            flags = self._flags.detect(eye, objects, pose_result, head)
+            students.append(StudentAnalysis(
+                student_id=str(idx),
+                track_id=idx,
+                attention_score=result.attention,
+                focus_score=round(spatial, 1),
+                state=result.state,
+                head_pose=HeadPose(**head) if head else None,
+                eye_metrics=EyeMetrics(**eye) if eye else None,
+                head_motion=result.head_motion,
+                perclos=result.perclos,
+                flags=BehaviorFlags(**flags),
+            ))
 
-            students.append(self._build_student(track, attention, focus, state, head, eye, flags))
+        frame_id = self._frame_counter.setdefault(session_id, 0)
+        self._frame_counter[session_id] = frame_id + 1
 
-        frame_id = self._frame_counter.setdefault(req.session_id, 0)
-        self._frame_counter[req.session_id] = frame_id + 1
-
-        return AnalysisResponse(
-            session_id=req.session_id,
-            timestamp_ms=req.timestamp_ms or int(time.time() * 1000),
+        response = AnalysisResponse(
+            session_id=session_id,
+            timestamp_ms=timestamp_ms,
             frame_id=frame_id,
             students=students,
             processing_ms=round((time.monotonic() - t0) * 1000, 2),
         )
-
-    @staticmethod
-    def _build_student(track, attention, focus, state, head, eye, flags):
-        from api.v1.schemas.responses import StudentAnalysis, HeadPose, EyeMetrics, BehaviorFlags
-        return StudentAnalysis(
-            student_id=str(track.id),
-            track_id=track.id,
-            attention_score=attention,
-            focus_score=focus,
-            state=state,
-            head_pose=HeadPose(**head) if head else None,
-            eye_metrics=EyeMetrics(**eye) if eye else None,
-            flags=BehaviorFlags(**flags),
-        )
+        return response, detections, faces

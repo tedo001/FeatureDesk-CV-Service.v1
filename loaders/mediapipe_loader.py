@@ -18,6 +18,10 @@ class MediaPipeLoader:
                     model_asset_path=settings.FACE_LANDMARKER_PATH
                 ),
                 running_mode=mp.tasks.vision.RunningMode.IMAGE,
+                num_faces=settings.MAX_FACES,
+                min_face_detection_confidence=0.5,
+                min_face_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
             )
             cls._face = mp.tasks.vision.FaceLandmarker.create_from_options(options)
         return cls._face

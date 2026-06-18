@@ -5,6 +5,7 @@ from typing import Optional
 class FrameAnalysisRequest(BaseModel):
     session_id: str = Field(..., description="Unique student session identifier")
     frame_b64: str = Field(..., description="Base64-encoded JPEG/PNG frame")
+    student_id: Optional[str] = Field(None, description="Student identifier, e.g. S001")
     timestamp_ms: Optional[int] = Field(None, description="Client-side epoch ms")
 
     @field_validator("frame_b64")

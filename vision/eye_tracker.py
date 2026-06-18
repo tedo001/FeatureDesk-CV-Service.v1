@@ -19,8 +19,11 @@ class EyeTracker:
             return None
         
         landmarks = face.landmarks
-        crop_w = face.bbox[2] - face.bbox[0]
-        crop_h = face.bbox[3] - face.bbox[1]
+        if face.image_size:
+            crop_w, crop_h = face.image_size
+        else:
+            crop_w = face.bbox[2] - face.bbox[0]
+            crop_h = face.bbox[3] - face.bbox[1]
 
         # Calculate Left Eye EAR
         left_pts = [np.array([landmarks[idx].x * crop_w, landmarks[idx].y * crop_h]) for idx in self.LEFT_EYE_INDICES]

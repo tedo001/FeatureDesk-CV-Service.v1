@@ -26,8 +26,11 @@ class HeadPoseEstimator:
             return None
 
         landmarks = face.landmarks
-        crop_w = face.bbox[2] - face.bbox[0]
-        crop_h = face.bbox[3] - face.bbox[1]
+        if face.image_size:
+            crop_w, crop_h = face.image_size
+        else:
+            crop_w = face.bbox[2] - face.bbox[0]
+            crop_h = face.bbox[3] - face.bbox[1]
 
         # 2D image points (scaled to crop pixels)
         image_points = np.array([
